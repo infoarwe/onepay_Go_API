@@ -1,0 +1,3 @@
+configurations/config.json
+*.exe
+server.log

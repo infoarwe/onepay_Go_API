@@ -1,0 +1,22 @@
+{
+    "port": ":8081",
+    "enableGinConsoleLog": true,
+    "enableGinFileLog": true,
+    "mode": "release",
+    "corsOrigins": "http://localhost:3000",
+    "logFilename": "logs/server.log",
+    "logMaxSize": 10,
+    "logMaxBackups": 10,
+    "logMaxAge": 30,
+    "mgAddrs": "mongodb+srv://<user>:<password>@<cluster-host>/master?retryWrites=true&w=majority",
+    "mgDbName": "master",
+    "mgDbUsername": "",
+    "mgDbPassword": "",
+    "user_key": "<jwt-signing-key>",
+    "product_key": "<Authorization header value required for non-bootstrap dispatch types>",
+    "default_api_key": "<default mobile_api_key returned by check_companydomain when the row has none>",
+    "default_mobile_socket_base": "<fallback socket base URL when a tenant's siteinfo doc has none, e.g. http://103.235.106.87:3033/>",
+    "default_timezone": "UTC",
+    "default_asset_base_url": "<public base URL static assets (driver photos, no-image placeholder) are served from, e.g. https://uat.bluetaxiindia.com>",
+    "legacy_authorization_key": "<OnePayTaxi tenant's fixed Authorization header value from fleetera_trial_mobilekey_tokenization.php, e.g. FNpfuspyEAzhjfoh2ONpWK0rsnClVL6OCaasqDQtWdI=>"
+}

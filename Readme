@@ -1,0 +1,36 @@
+go get github.com/gin-gonic/gin
+go get go.mongodb.org/mongo-driver/mongo
+go get github.com/nicksnyder/go-i18n/v2/i18n
+go get github.com/gin-contrib/cors
+github.com/golang-jwt/jwt/v5
+go install github.com/swaggo/swag/cmd/swag@latest
+go get -u github.com/swaggo/gin-swagger
+go get -u github.com/swaggo/files
+
+Single global DB interface (database.DB)
+
+Allows you to switch database implementation in the future (MongoDB → MySQL/Postgres) without changing middleware.
+
+Domain-based database selection (GetDatabase(domain))
+
+Each request gets the correct DB based on the Domain header.
+
+Caches domain -> *mongo.Database in domainDBMap to avoid repeated Database() calls.
+
+Middleware injection (ValidateDomain)
+
+Injects domain DB into Gin Context for each request.
+
+Prevents code duplication — all handlers just read from c.Get("db").
+
+LoadDomains preloading
+
+Reduces the need to hit master DB every time, which is good for performance.
+
+Separation of concerns
+
+mongodb.go handles DB logic.
+
+database.go contains the interface.
+
+helper.ValidateDomain just checks DB existence.
