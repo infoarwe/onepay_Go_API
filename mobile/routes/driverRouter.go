@@ -34,27 +34,30 @@ func RegisterDriverLocationRoutes(router *gin.Engine) {
 	)
 }
 
-// RegisterDriverAuthRoutes registers POST /driver_login at the top level,
-// same pattern as RegisterDriverLocationRoutes - a dedicated path instead
-// of going through /driverapi301/index?type=driver_login, even though the
-// legacy PHP dispatches it as one of action_index()'s switch cases.
-// ProductAuthenticate is still required (the `authkey` header) - research
-// confirmed driver_login is not in the legacy exemption list
-// check_companydomain/getcoreconfig are in. There's no DriverAuthenticate
-// here since a driver isn't authenticated yet at login time; domain
-// resolution happens inside DriverLogin() itself (via the Domain header),
-// same self-contained style as GetCoreConfig.
+// RegisterDriverAuthRoutes registers POST /driver_login at the top level -
+// a dedicated path instead of going through
+// /driverapi201/index?type=driver_login, even though the legacy PHP
+// dispatches it as one of action_index()'s switch cases. Uses
+// LegacyProductAuthenticate (the fixed `Authorization` header) rather than
+// ProductAuthenticate/`authkey` - OnePayTaxi's distinct scheme, see
+// middleware/legacyAuthMiddleware.go and driverAuthController.go's
+// DriverLogin doc comment. There's no driver-session middleware here since
+// a driver isn't authenticated yet at login time; domain resolution
+// happens inside DriverLogin() itself (via the Domain header), same
+// self-contained style as GetCoreConfig.
 func RegisterDriverAuthRoutes(router *gin.Engine) {
 	router.POST("/driver_login",
-		middleware.ProductAuthenticate(),
+		middleware.LegacyProductAuthenticate(),
 		controller.DriverLogin(),
 	)
 
-	// driver_change_password is a logged-in action, unlike driver_login -
-	// resolves the tenant via ValidateDomain and the driver via
-	// DriverAuthenticate's session JWT, same pattern as
-	// driver_location_history_update. See DriverChangePassword's doc
-	// comment for why the body's driver_id isn't trusted as the target.
+	// driver_change_password still uses BlueTaxi's JWT auth chain
+	// (ValidateDomain + DriverAuthenticate) inherited from the original
+	// port - NOT yet switched to LegacyProductAuthenticate/
+	// LegacyDriverAuthenticate like driver_login/driver_booking_list
+	// above, so it will reject OnePayTaxi's actual mobile app as-is. Out
+	// of scope for this pass; needs the same auth-chain fix before it's
+	// usable for this tenant.
 	router.POST("/driver_change_password",
 		middleware.ValidateDomain(),
 		middleware.DriverAuthenticate(),

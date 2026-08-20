@@ -55,19 +55,17 @@ type DriverLocationHistoryUpdateRequest struct {
 	Lang string                          `json:"lang"`
 }
 
-// DriverLoginRequest binds moddriverapi201.php's driver_login case body.
-// Password is the client's MD5 hex digest of the plaintext password
-// (confirmed via research: the legacy backend does a raw string-equality
-// match against the stored `password` field, no server-side hashing at
-// all) - kept as-is here rather than re-hashed, for compatibility with
-// existing stored driver passwords.
+// DriverLoginRequest binds moddriverapi201.php's driver_login case body
+// (OnePayTaxi tenant, ~line 9554-9974). Password is the client's MD5 hex
+// digest of the plaintext password - the legacy backend does a raw
+// string-equality match against the stored `password` field, no
+// server-side hashing at all - kept as-is here rather than re-hashed, for
+// compatibility with existing stored driver passwords.
 //
-// ForceLogin is bound but intentionally unused: research against the live
-// PHP confirms the currently-shipping driver_login case never reads
-// `force_login` from the request at all (that field only exists in the
-// separate, unreachable `driver_login_old` case) - "another device is
-// signed in" is instead handled unconditionally based on the driver's free/
-// busy status, regardless of what the client sends here.
+// ForceLogin IS read here (unlike BlueTaxi's driver_login, which never
+// reads it): OnePayTaxi's actual case has a genuine force_login device-
+// takeover branch (~line 9640) BlueTaxi's port doesn't have - see
+// controllers/driverAuthController.go's DriverLogin doc comment.
 type DriverLoginRequest struct {
 	Phone       string `json:"phone"`
 	Password    string `json:"password"`

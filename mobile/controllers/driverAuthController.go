@@ -4,10 +4,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
+	"time"
 
 	"mobileapi/database"
-	helper "mobileapi/helpers"
 	"mobileapi/models"
 	"mobileapi/requests"
 	"mobileapi/response"
@@ -18,27 +17,28 @@ import (
 )
 
 // This file ports moddriverapi201.php action_index()'s 'driver_login' case
-// (BlueTaxi tenant, ~line 10273-10471) plus its model dependencies in
-// moddriverapi113.php/modmobileapi111extended.php. See
-// models/driverAuthModel.go's doc comment for the fidelity notes on
-// driver_statistics and the shift_history/driver_referral_list schema
-// assumptions.
+// (OnePayTaxi tenant, ~line 9554-9974) plus its model dependencies in
+// moddriverapi113.php/modmobileapi111extended.php/fleeteracommonmodel.php.
+// Model-layer functions shared with BlueTaxi's original port
+// (AuthenticateDriver, FindDriverProfile, UpdateDriverPhone,
+// FindTaxiForDriver, FindActiveShift, ComputeDriverStatistics,
+// FindRecentTripList, FindEmergencyContacts - all in driverAuthModel.go)
+// are reused as-is, confirmed to port the same shared platform PHP both
+// tenants call. OnePayTaxi-specific pieces (token issuance, shift
+// creation, force_login device takeover, current-trip lookup) are in
+// models/driverLoginModel.go - see that file's doc comment for what's
+// deliberately not ported (Firebase push on takeover, the FORCE_SHIFTOUT
+// warning branch).
 //
-// Auth: unlike the legacy response (a `user_key` opaque token, persisted
-// server-side in a separate user_auth_token collection - see research), this
-// issues the existing tokenHelper.go session JWT (GenerateAllTokens) as
-// `access_token`/`refresh_token`, matching the driver_location_history_update
-// port's auth scheme. mint_test_token was a stand-in for this endpoint; once
-// this ships, real logins should be used instead.
-//
-// Dispatched via POST /driverapi301/index?type=driver_login, same as
-// check_companydomain/getcoreconfig - domain is resolved from the `Domain`
-// header (not `dn`/body, since this is a real per-tenant data operation
-// rather than a bootstrap call), matching driver_location_history_update's
-// convention. Requires the `authkey` product header (research confirmed
-// driver_login is NOT in the legacy exemption list check_companydomain/
-// getcoreconfig are in) - enforced by ProductAuthenticate at the route
-// group level, same as every other non-exempt dispatch type.
+// Auth: OnePayTaxi's mobile app was never updated to send a JWT - it
+// still sends/expects the DB-backed opaque token issued here
+// (models.IssueUserAuthToken, MDB_USER_TOKEN), returned as `user_key`
+// (the legacy field name) rather than access_token/refresh_token.
+// Dispatched via POST /driver_login with the fixed `Authorization`
+// product-key header (LegacyProductAuthenticate, registered in
+// routes/driverRouter.go) - NOT `authkey`/ProductAuthenticate, which is
+// BlueTaxi's distinct scheme. Domain is resolved from the `Domain` header
+// (ValidateDomain), same as every other per-tenant route.
 //
 // Legacy driver password comparison is a raw equality check against an
 // MD5 hex digest the client computes and sends as-is (see
@@ -69,6 +69,11 @@ func DriverLogin() gin.HandlerFunc {
 		}
 		tenantDB, _ := mongoDB.GetDatabase(domain)
 
+		// check_phone_people() + check_mobile_driver() + driver_login() are
+		// three separate legacy queries distinguishing "phone not
+		// registered" / "signup incomplete" / "wrong password" - collapsed
+		// into the one AuthenticateDriver lookup, same rationale as
+		// BlueTaxi's port (see driverAuthModel.go's file doc comment).
 		record, err := models.AuthenticateDriver(tenantDB, req.Phone, 0)
 		if err != nil {
 			log.Println("driver_login: AuthenticateDriver error:", err)
@@ -93,16 +98,19 @@ func DriverLogin() gin.HandlerFunc {
 			})
 			return
 		}
+
+		userStatus := toString(record["status"])
+		if userStatus == "T" {
+			c.JSON(http.StatusOK, response.LegacyResponse{Message: "Your account has been deactivated", Status: 0})
+			return
+		}
+
+		loginStatus := toString(record["login_status"])
+		loginFrom := toString(record["login_from"])
+		deviceID := toString(record["device_id"])
+
 		if toString(record["password"]) != req.Password {
 			c.JSON(http.StatusOK, response.LegacyResponse{Message: "Invalid password", Status: -1})
-			return
-		}
-		if toString(record["trip_reject_block"]) == "1" {
-			c.JSON(http.StatusOK, response.LegacyResponse{Message: "Your account is temporarily blocked due to trip rejections", Status: 10})
-			return
-		}
-		if toString(record["status"]) != "A" {
-			c.JSON(http.StatusOK, response.LegacyResponse{Message: "Login access denied", Status: -1})
 			return
 		}
 
@@ -124,38 +132,57 @@ func DriverLogin() gin.HandlerFunc {
 		if freeStatus == "" {
 			freeStatus = "F"
 		}
-		driverStatus := freeStatus
-		if currentTrip, ok := profile["current_trip"].(bson.A); ok && len(currentTrip) > 0 {
+		if currentTripArr, ok := profile["current_trip"].(bson.A); ok && len(currentTripArr) > 0 {
 			freeStatus = "B"
-			driverStatus = "B"
 		}
 
-		// "Another device is already signed in" - handled unconditionally
-		// based on free/busy status, not gated behind force_login (see
-		// requests.DriverLoginRequest's doc comment).
-		if toString(record["login_status"]) == "S" && toString(record["login_from"]) == "D" && toString(record["device_id"]) != req.DeviceID {
-			if freeStatus != "F" {
+		// Another device is currently signed in as this driver.
+		deviceConflict := loginStatus == "S" && loginFrom == "D" && deviceID != req.DeviceID
+		if deviceConflict {
+			if !req.ForceLogin {
+				c.JSON(http.StatusOK, response.LegacyResponse{Message: "Driver already logged in another device", Status: 0})
+				return
+			}
+			if freeStatus != "F" && freeStatus != "" {
 				c.JSON(http.StatusOK, response.LegacyResponse{Message: "Driver is currently on a trip on another device", Status: -1})
 				return
 			}
-			if err := models.UpdateDriverPhone(tenantDB, driverID, req.DeviceID, req.DeviceToken, req.DeviceType, "S"); err != nil {
-				log.Println("driver_login: UpdateDriverPhone (takeover) error:", err)
+			if err := models.ForceLoginTakeover(tenantDB, driverID, req.DeviceID, req.DeviceToken, req.DeviceType); err != nil {
+				log.Println("driver_login: ForceLoginTakeover error:", err)
+				c.JSON(http.StatusOK, response.LegacyResponse{Message: "Database Connection Failed", Status: 2})
+				return
 			}
+			// The Firebase push kicking the old device is deliberately not
+			// sent here - see models/driverLoginModel.go's doc comment.
 		}
 
-		shiftStatus := "F"
-		if shift, err := models.FindActiveShift(tenantDB, driverID); err != nil {
-			log.Println("driver_login: FindActiveShift error:", err)
-		} else if shift != nil {
-			if err := models.CloseActiveShift(tenantDB, shift["_id"]); err != nil {
-				log.Println("driver_login: CloseActiveShift error:", err)
-			}
-			shiftStatus = "OUT"
-		}
-
-		var taxiID interface{}
-		if taxiID, err = models.FindTaxiForDriver(tenantDB, driverID); err != nil {
+		taxiID, err := models.FindTaxiForDriver(tenantDB, driverID)
+		if err != nil {
 			log.Println("driver_login: FindTaxiForDriver error:", err)
+		}
+		if taxiID == nil {
+			c.JSON(http.StatusOK, response.LegacyResponse{Message: "No taxi is currently assigned to you", Status: -3})
+			return
+		}
+
+		if !deviceConflict {
+			// Normal path (no other-device conflict to resolve): register
+			// this device/session directly, matching update_driver_phone()'s
+			// field set in the legacy 'else' branch.
+			if err := models.UpdateDriverPhone(tenantDB, driverID, req.DeviceID, req.DeviceToken, req.DeviceType, "S"); err != nil {
+				log.Println("driver_login: UpdateDriverPhone error:", err)
+			}
+		}
+
+		// Both the force_login-takeover and normal paths open a fresh shift
+		// and report shift_status "IN" in the legacy response - reproduced
+		// unconditionally here for both, rather than replicating
+		// get_driver_currentshift()'s confirmed field-mapping bug that
+		// (accidentally) makes the legacy force_login path skip opening one
+		// (see driverLoginModel.go's file doc comment on this policy).
+		shiftID, err := models.InsertDriverShift(tenantDB, driverID, taxiID)
+		if err != nil {
+			log.Println("driver_login: InsertDriverShift error:", err)
 		}
 
 		siteInfo, err := models.FindSiteInfo(tenantDB)
@@ -167,6 +194,14 @@ func DriverLogin() gin.HandlerFunc {
 			timezoneField = siteInfo["timezone"]
 		}
 		_, loc := resolveTenantLocation(timezoneField)
+
+		now := time.Now().In(loc)
+		dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).UTC()
+		currentTrip, err := models.GetDriverCurrentTrip(tenantDB, driverID, dayStart)
+		if err != nil {
+			log.Println("driver_login: GetDriverCurrentTrip error:", err)
+		}
+		driverStatus := models.DeriveDriverStatus(currentTrip.TravelStatus)
 
 		stats, err := models.ComputeDriverStatistics(tenantDB, driverID, loc)
 		if err != nil {
@@ -184,19 +219,23 @@ func DriverLogin() gin.HandlerFunc {
 			sosDetail = []interface{}{}
 		}
 
-		if err := models.UpdateDriverPhone(tenantDB, driverID, req.DeviceID, req.DeviceToken, req.DeviceType, "S"); err != nil {
-			log.Println("driver_login: UpdateDriverPhone error:", err)
+		userKey, err := models.IssueUserAuthToken(tenantDB, driverID, req.Phone, req.DeviceID, req.DeviceToken)
+		if err != nil {
+			log.Println("driver_login: IssueUserAuthToken error:", err)
+			c.JSON(http.StatusOK, response.LegacyResponse{Message: "Database Connection Failed", Status: 2})
+			return
 		}
 
 		driverDetails := flattenDriverProfile(profile)
 		driverDetails["userid"] = driverID
-		driverDetails["shift_status"] = shiftStatus
-		driverDetails["shiftupdate_id"] = nil
+		driverDetails["shift_status"] = "IN"
+		driverDetails["shiftupdate_id"] = shiftID
 		driverDetails["taxi_id"] = taxiID
-		driverDetails["driver_first_login"] = record["driver_first_login"]
+		driverDetails["trip_id"] = currentTrip.PassengersLogID
+		driverDetails["travel_status"] = currentTrip.TravelStatus
 		driverDetails["driver_status"] = driverStatus
-		driverDetails["travel_status"] = ""
-		driverDetails["driver_wallet"] = nil
+		driverDetails["driver_first_login"] = record["driver_first_login"]
+		driverDetails["driver_wallet"] = shiftID
 		bankID := toString(driverDetails["bank_id"])
 		driverDetails["bank_id_status"] = 0
 		if bankID != "" {
@@ -217,25 +256,52 @@ func DriverLogin() gin.HandlerFunc {
 			"overall_rejected_trips": stats.RejectedTrips,
 			"cancelled_trips":        stats.CancelledTrips,
 			"today_earnings":         fmt.Sprintf("%.2f", stats.TodayEarnings),
-			"shift_status":           shiftStatus,
+			"shift_status":           "IN",
 			"time_driven":            stats.TimeDrivenToday,
 			"status":                 1,
 		}
-
-		accessToken, refreshToken, err := helper.GenerateAllTokens(strconv.FormatInt(driverID, 10), domain)
-		if err != nil {
-			log.Println("driver_login: GenerateAllTokens error:", err)
+		if driverFirstLogin := int(toInt64(record["driver_first_login"])); driverFirstLogin == 1 && userStatus == "A" {
+			if err := models.ChangeDriverFirstLoginFlag(tenantDB, driverID); err != nil {
+				log.Println("driver_login: ChangeDriverFirstLoginFlag error:", err)
+			}
 		}
 
-		c.JSON(http.StatusOK, gin.H{
-			"message":          "You have logged in successfully",
-			"status":           1,
+		// A deactivated ('D') account is still allowed through the whole
+		// flow above (shift opened, session registered) - only the final
+		// message differs, matching the legacy driver_type=='D' branch.
+		message := "You have logged in successfully"
+		status := 1
+		if userStatus == "D" {
+			if signupStatus := int(toInt64(record["signup_status"])); signupStatus == 0 {
+				message = "Your account is not active"
+				status = 10
+			} else {
+				message = "Your account is waiting for admin approval"
+				status = 20
+			}
+		}
+
+		resp := gin.H{
+			"message":          message,
+			"status":           status,
 			"detail":           gin.H{"driver_details": []bson.M{driverDetails}},
 			"recent_trip_list": recentTripList,
-			"sos_detail":       sosDetail,
-			"access_token":     accessToken,
-			"refresh_token":    refreshToken,
-		})
+			"user_key":         userKey,
+		}
+		if status == 1 {
+			resp["sos_detail"] = sosDetail
+		}
+		if siteInfo != nil {
+			if v, ok := siteInfo["driver_threshold_setting"]; ok {
+				resp["driver_threshold_setting"] = v
+			}
+			if v, ok := siteInfo["driver_threshold_amount"]; ok {
+				resp["driver_threshold_amount"] = v
+			}
+		}
+		resp["driver_wallet"] = shiftID
+
+		c.JSON(http.StatusOK, resp)
 	}
 }
 
