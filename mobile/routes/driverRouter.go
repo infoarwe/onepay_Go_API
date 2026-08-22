@@ -66,12 +66,20 @@ func RegisterDriverAuthRoutes(router *gin.Engine) {
 }
 
 // RegisterDriverTripListRoutes registers POST /driver_recent_trip_list -
-// same auth pattern as driver_change_password (ValidateDomain +
-// DriverAuthenticate), since it's a logged-in driver's dashboard payload.
+// switched to the same OnePayTaxi auth chain as driver_login/
+// driver_booking_list (LegacyProductAuthenticate + ValidateDomain +
+// LegacyDriverAuthenticate) instead of the inherited BlueTaxi JWT chain
+// (ValidateDomain + DriverAuthenticate), since this tenant's mobile app
+// sends the DB-backed opaque `userAuth` token issued by driver_login, not
+// a JWT. DriverRecentTripList() itself needed no changes - it already
+// reads driver_id from context via parseInt64(toStringAny(...)), which is
+// agnostic to whether LegacyDriverAuthenticate (int64) or DriverAuthenticate
+// (string) put it there.
 func RegisterDriverTripListRoutes(router *gin.Engine) {
 	router.POST("/driver_recent_trip_list",
+		middleware.LegacyProductAuthenticate(),
 		middleware.ValidateDomain(),
-		middleware.DriverAuthenticate(),
+		middleware.LegacyDriverAuthenticate(),
 		controller.DriverRecentTripList(),
 	)
 }

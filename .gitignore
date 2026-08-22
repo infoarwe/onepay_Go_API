@@ -38,7 +38,11 @@ Thumbs.db
 # Applications
 *.app
 *.exe
+*.exe~
 *.war
+
+# Postman collections (may contain live keys/tokens as collection variables)
+*.postman_collection.json
 
 # Large media files
 *.mp4

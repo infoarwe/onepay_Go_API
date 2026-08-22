@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -81,6 +82,7 @@ func LegacyDriverAuthenticate() gin.HandlerFunc {
 
 		tok, err := models.AuthenticateUserToken(db, userAuth, driverID)
 		if err != nil {
+			log.Println("LegacyDriverAuthenticate: AuthenticateUserToken error:", err)
 			c.JSON(http.StatusOK, response.LegacyResponse{Message: "Database Connection Failed", Status: 2})
 			c.Abort()
 			return
