@@ -57,28 +57,87 @@ func AuthenticateUserToken(masterDB *mongo.Database, userAuth string, driverID i
 // DriverShowBookingRow is the shape driver_show_bookings() projects, before
 // the controller's per-row commission/formatting pass.
 type DriverShowBookingRow struct {
-	PassengersLogID                 int64   `bson:"passengers_log_id"`
-	PickupTime                      time.Time `bson:"pickup_time"`
-	PickupLongitude                 float64 `bson:"pickup_longitude"`
-	PickupLatitude                  float64 `bson:"pickup_latitude"`
-	DropLatitude                    float64 `bson:"drop_latitude"`
-	DropLongitude                   float64 `bson:"drop_longitude"`
-	PickupLocation                  string  `bson:"pickup_location"`
-	DropLocation                    interface{} `bson:"drop_location"`
-	ApproxFare                      float64 `bson:"approx_fare"`
-	Distance                        interface{} `bson:"distance"`
-	ApproxDistance                  float64 `bson:"approx_distance"`
-	Notes                           string  `bson:"notes"`
-	TripType                        interface{} `bson:"trip_type"`
-	OsTripType                      interface{} `bson:"os_trip_type"`
-	CancellationFare                float64 `bson:"cancellation_fare"`
-	TaxiModelID                     interface{} `bson:"taxi_modelid"`
-	ModelCommissionEnable           interface{} `bson:"model_commission_enable"`
-	LocalModelAdminCommission       interface{} `bson:"local_model_admin_commission"`
-	RentalModelAdminCommission      interface{} `bson:"rental_model_admin_commission"`
-	OutstationModelAdminCommission  interface{} `bson:"outstation_model_admin_commission"`
-	DriverBeta                      float64 `bson:"driver_beta"`
-	OsDayCount                      interface{} `bson:"os_day_count"`
+	PassengersLogID                int64       `bson:"passengers_log_id"`
+	PickupTime                     time.Time   `bson:"pickup_time"`
+	PickupLongitude                float64     `bson:"pickup_longitude"`
+	PickupLatitude                 float64     `bson:"pickup_latitude"`
+	DropLatitude                   float64     `bson:"drop_latitude"`
+	DropLongitude                  float64     `bson:"drop_longitude"`
+	PickupLocation                 string      `bson:"pickup_location"`
+	DropLocation                   interface{} `bson:"drop_location"`
+	ApproxFare                     float64     `bson:"approx_fare"`
+	Distance                       interface{} `bson:"distance"`
+	ApproxDistance                 float64     `bson:"approx_distance"`
+	Notes                          string      `bson:"notes"`
+	TripType                       interface{} `bson:"trip_type"`
+	OsTripType                     interface{} `bson:"os_trip_type"`
+	CancellationFare               float64     `bson:"cancellation_fare"`
+	TaxiModelID                    interface{} `bson:"taxi_modelid"`
+	ModelCommissionEnable          interface{} `bson:"model_commission_enable"`
+	LocalModelAdminCommission      interface{} `bson:"local_model_admin_commission"`
+	RentalModelAdminCommission     interface{} `bson:"rental_model_admin_commission"`
+	OutstationModelAdminCommission interface{} `bson:"outstation_model_admin_commission"`
+	DriverBeta                     float64     `bson:"driver_beta"`
+	OsDayCount                     interface{} `bson:"os_day_count"`
+}
+
+// showBookingBasePipeline is the $match/$lookup/$unwind/$match prefix
+// shared by DriverShowBookings and CountDriverShowBookings - the same
+// "unassigned, not yet scheduled to another driver, within this driver's
+// allowed models" filter, before either projecting rows or just counting
+// them. Kept as one function so the two can't drift out of sync.
+func showBookingBasePipeline(allowedModelIDs []int64) mongo.Pipeline {
+	matchQuery := bson.M{
+		"show_booking_all_driver": 1,
+		"travel_status":           0,
+		"driver_id":               0,
+		"pickup_time":             bson.M{"$gt": time.Now().UTC()},
+		"taxi_modelid":            bson.M{"$in": allowedModelIDs},
+	}
+
+	return mongo.Pipeline{
+		bson.D{{Key: "$match", Value: matchQuery}},
+		bson.D{{Key: "$lookup", Value: bson.M{
+			"from":         collections.SCHEDULE_TRIPS,
+			"localField":   "_id",
+			"foreignField": "plogs_id",
+			"as":           "schedule",
+		}}},
+		bson.D{{Key: "$unwind", Value: bson.M{"path": "$schedule", "preserveNullAndEmptyArrays": true}}},
+		bson.D{{Key: "$match", Value: bson.M{
+			"schedule.driver_id": bson.M{"$not": bson.M{"$gt": 0}},
+		}}},
+	}
+}
+
+// CountDriverShowBookings returns just the count behind request_type=3's
+// list (driver_show_bookings) - used by driver_recent_trip_list (legacy) to
+// surface a "new bookings available" badge count without pulling the full
+// row projection DriverShowBookings does.
+func CountDriverShowBookings(tenantDB *mongo.Database, allowedModelIDs []int64) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pipeline := append(showBookingBasePipeline(allowedModelIDs),
+		bson.D{{Key: "$count", Value: "count"}},
+	)
+
+	cursor, err := tenantDB.Collection(collections.PASSENGERS_LOGS).Aggregate(ctx, pipeline)
+	if err != nil {
+		return 0, err
+	}
+	defer cursor.Close(ctx)
+
+	var rows []struct {
+		Count int64 `bson:"count"`
+	}
+	if err := cursor.All(ctx, &rows); err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	return rows[0].Count, nil
 }
 
 // DriverShowBookings ports driver_show_bookings($company_id, $driver_id,
@@ -91,52 +150,33 @@ func DriverShowBookings(tenantDB *mongo.Database, allowedModelIDs []int64, start
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	matchQuery := bson.M{
-		"show_booking_all_driver": 1,
-		"travel_status":           0,
-		"driver_id":               0,
-		"pickup_time":             bson.M{"$gt": time.Now().UTC()},
-		"taxi_modelid":            bson.M{"$in": allowedModelIDs},
-	}
-
-	pipeline := mongo.Pipeline{
-		bson.D{{Key: "$match", Value: matchQuery}},
-		bson.D{{Key: "$lookup", Value: bson.M{
-			"from":         collections.SCHEDULE_TRIPS,
-			"localField":   "_id",
-			"foreignField": "plogs_id",
-			"as":           "schedule",
-		}}},
-		bson.D{{Key: "$unwind", Value: bson.M{"path": "$schedule", "preserveNullAndEmptyArrays": true}}},
-		bson.D{{Key: "$match", Value: bson.M{
-			"schedule.driver_id": bson.M{"$not": bson.M{"$gt": 0}},
-		}}},
+	pipeline := append(showBookingBasePipeline(allowedModelIDs),
 		bson.D{{Key: "$project", Value: bson.M{
-			"passengers_log_id":                  "$_id",
-			"pickup_time":                         "$pickup_time",
-			"pickup_longitude":                    bson.M{"$convert": bson.M{"input": "$pickup_longitude", "to": "double", "onError": 0, "onNull": 0}},
-			"pickup_latitude":                     bson.M{"$convert": bson.M{"input": "$pickup_latitude", "to": "double", "onError": 0, "onNull": 0}},
-			"drop_latitude":                       bson.M{"$convert": bson.M{"input": "$drop_latitude", "to": "double", "onError": 0, "onNull": 0}},
-			"drop_longitude":                      bson.M{"$convert": bson.M{"input": "$drop_longitude", "to": "double", "onError": 0, "onNull": 0}},
-			"pickup_location":                     "$current_location",
-			"drop_location":                       bson.M{"$ifNull": bson.A{"$drop_location", 0}},
-			"approx_fare":                         bson.M{"$convert": bson.M{"input": "$approx_fare", "to": "double", "onError": 0, "onNull": 0}},
-			"distance":                            bson.M{"$ifNull": bson.A{"$distance", 0}},
-			"approx_distance":                     bson.M{"$convert": bson.M{"input": "$approx_distance", "to": "double", "onError": 0, "onNull": 0}},
-			"notes":                               bson.M{"$ifNull": bson.A{"$notes_driver", ""}},
-			"trip_type":                           "$trip_type",
-			"os_trip_type":                        "$os_trip_type",
-			"cancellation_fare":                   bson.M{"$convert": bson.M{"input": "$fare_info.cancellation_fare", "to": "double", "onError": 0, "onNull": 0}},
-			"taxi_modelid":                        "$taxi_modelid",
-			"model_commission_enable":             "$model_commission_enable",
-			"local_model_admin_commission":        "$local_model_admin_commission",
-			"rental_model_admin_commission":       "$rental_model_admin_commission",
-			"outstation_model_admin_commission":   "$outstation_model_admin_commission",
-			"driver_beta":                         bson.M{"$convert": bson.M{"input": "$driver_beta", "to": "double", "onError": 0, "onNull": 0}},
-			"os_day_count":                        "$os_day_count",
+			"passengers_log_id":                 "$_id",
+			"pickup_time":                       "$pickup_time",
+			"pickup_longitude":                  bson.M{"$convert": bson.M{"input": "$pickup_longitude", "to": "double", "onError": 0, "onNull": 0}},
+			"pickup_latitude":                   bson.M{"$convert": bson.M{"input": "$pickup_latitude", "to": "double", "onError": 0, "onNull": 0}},
+			"drop_latitude":                     bson.M{"$convert": bson.M{"input": "$drop_latitude", "to": "double", "onError": 0, "onNull": 0}},
+			"drop_longitude":                    bson.M{"$convert": bson.M{"input": "$drop_longitude", "to": "double", "onError": 0, "onNull": 0}},
+			"pickup_location":                   "$current_location",
+			"drop_location":                     bson.M{"$ifNull": bson.A{"$drop_location", 0}},
+			"approx_fare":                       bson.M{"$convert": bson.M{"input": "$approx_fare", "to": "double", "onError": 0, "onNull": 0}},
+			"distance":                          bson.M{"$ifNull": bson.A{"$distance", 0}},
+			"approx_distance":                   bson.M{"$convert": bson.M{"input": "$approx_distance", "to": "double", "onError": 0, "onNull": 0}},
+			"notes":                             bson.M{"$ifNull": bson.A{"$notes_driver", ""}},
+			"trip_type":                         "$trip_type",
+			"os_trip_type":                      "$os_trip_type",
+			"cancellation_fare":                 bson.M{"$convert": bson.M{"input": "$fare_info.cancellation_fare", "to": "double", "onError": 0, "onNull": 0}},
+			"taxi_modelid":                      "$taxi_modelid",
+			"model_commission_enable":           "$model_commission_enable",
+			"local_model_admin_commission":      "$local_model_admin_commission",
+			"rental_model_admin_commission":     "$rental_model_admin_commission",
+			"outstation_model_admin_commission": "$outstation_model_admin_commission",
+			"driver_beta":                       bson.M{"$convert": bson.M{"input": "$driver_beta", "to": "double", "onError": 0, "onNull": 0}},
+			"os_day_count":                      "$os_day_count",
 		}}},
 		bson.D{{Key: "$sort", Value: bson.M{"pickup_time": 1}}},
-	}
+	)
 	if start != nil && limit != nil {
 		pipeline = append(pipeline,
 			bson.D{{Key: "$skip", Value: *start}},
