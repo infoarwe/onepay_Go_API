@@ -17,20 +17,34 @@ Starts on the port configured in `web/configurations/config.json` (`:8082` by de
 
 ### Deploy (production server)
 
+This repo (`onepay_Go_API`) is mobile-only - there's no `web/` here (that's a
+separate BlueTaxi repo/deployment). It also isn't running as a systemd
+service: it's a plain background process, restarted by killing the old PID
+and relaunching with `nohup`.
+
 ```bash
-cd /opt/backend-go-api
+ssh root@103.235.106.75 -p 4933   # get the current password from a teammate/vault - do not commit it here
+
+cd /root/onepay_Go_API
 git pull
-cd mobile && /usr/local/go/bin/go build -o mobileapi . && systemctl restart bluetaxi-mobile
-cd ../web && /usr/local/go/bin/go build -o webapi . && systemctl restart bluetaxi-web
+cd mobile
+go build -o onepay_mobileapi .
+
+# find the currently running instance, then swap it for the new binary
+ps aux | grep onepay_mobileapi
+kill <pid>
+sleep 2
+nohup ./onepay_mobileapi > mobileapi.log 2>&1 &
+disown
+
+# verify it came back up on :8081
+ps aux | grep onepay_mobileapi
+ss -ltnp | grep 8081
 ```
 
-This only redeploys the Go API. If the frontend (`web/src`) changed too, also rebuild it - `git pull` and the `go build` above do **not** touch `dist-uat/`/`dist-live/`, and nginx for `uatwebapp.bluetaxiindia.com` / `webapp.bluetaxiindia.com` serves those folders directly (no restart needed after rebuilding, nginx just serves whatever's on disk):
-
-```bash
-cd /opt/backend-go-api/web
-npm run build:uat    # updates dist-uat/  -> uatwebapp.bluetaxiindia.com
-npm run build:live   # updates dist-live/ -> webapp.bluetaxiindia.com
-```
+There's a brief gap in service between `kill` and the relaunch - fine for a
+low-traffic UAT box, but worth converting to a systemd unit (auto-restart,
+no manual PID hunting) before this sees real production load.
 
 ---
 

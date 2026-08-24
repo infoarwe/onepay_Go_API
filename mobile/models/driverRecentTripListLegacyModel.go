@@ -24,13 +24,14 @@ import (
 // controllers/driverRecentTripListLegacyController.go for the field-by-field
 // port notes.
 
-// GetDriverRecentInfoLegacy ports the MDB_PEOPLE reads behind
-// driver_login_status()/getDriverInfo() for this case - both only ever read
-// fields off the same driver document, so this is a single findOne with a
-// combined projection. Returns nil (not an error) when the driver doesn't
-// exist for this id/user_type, matching driver_logged_status()'s "driver
-// not found" -> login_status 0 short circuit (see the controller's
-// login_status handling).
+// GetDriverRecentInfoLegacy ports the driver_login_status() MDB_PEOPLE read
+// for this case (just `status` - accept_higher_end_model is read separately
+// via GetDriverModelInfo in driverBookingListModel.go, merged with
+// taxi_mapping.model_id for the controller's accept_higher_end_model
+// response field). Returns nil (not an error) when the driver doesn't exist
+// for this id/user_type, matching driver_logged_status()'s "driver not
+// found" -> login_status 0 short circuit (see the controller's login_status
+// handling).
 func GetDriverRecentInfoLegacy(tenantDB *mongo.Database, driverID int64) (bson.M, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -38,7 +39,7 @@ func GetDriverRecentInfoLegacy(tenantDB *mongo.Database, driverID int64) (bson.M
 	var raw bson.M
 	err := tenantDB.Collection(collections.PEOPLE).
 		FindOne(ctx, bson.M{"_id": driverID, "user_type": "D"}, options.FindOne().SetProjection(bson.M{
-			"status": 1, "accept_higher_end_model": 1,
+			"status": 1,
 		})).
 		Decode(&raw)
 	if err == mongo.ErrNoDocuments {

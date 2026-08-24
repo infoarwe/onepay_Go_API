@@ -128,20 +128,31 @@ func DriverRecentTripListLegacy() gin.HandlerFunc {
 			log.Println("driver_recent_trip_list (legacy): GetDriverTodayEarningsLegacy error:", err)
 		}
 
+		// modelInfo.AllowedModelIDs is people.taxi_mapping.model_id (the
+		// driver's own assigned model) merged with people.accept_higher_end_model
+		// (models they've separately opted into), deduped - the same $in
+		// list driver_show_bookings' own query filters taxi_modelid
+		// against (see GetDriverModelInfo in driverBookingListModel.go).
+		// Used here for two things: the accept_higher_end_model field below
+		// (merged rather than accept_higher_end_model alone, since the app
+		// wants "which models can this driver see bookings for", not just
+		// the opt-in list) and show_booking_count.
+		modelInfo, err := models.GetDriverModelInfo(db, driverID)
+		if err != nil {
+			log.Println("driver_recent_trip_list (legacy): GetDriverModelInfo error:", err)
+			modelInfo = &models.DriverModelInfo{}
+		} else if modelInfo == nil {
+			modelInfo = &models.DriverModelInfo{}
+		}
+
 		// show_booking_count: how many unassigned trips (request_type=3 /
 		// driver_show_bookings in driver_booking_list) are currently
 		// available for this driver's taxi model(s) - a badge count for the
 		// home screen, not part of the legacy PHP response but requested
 		// alongside this port.
-		var showBookingCount int64
-		modelInfo, err := models.GetDriverModelInfo(db, driverID)
+		showBookingCount, err := models.CountDriverShowBookings(db, modelInfo.AllowedModelIDs)
 		if err != nil {
-			log.Println("driver_recent_trip_list (legacy): GetDriverModelInfo error:", err)
-		} else if modelInfo != nil {
-			showBookingCount, err = models.CountDriverShowBookings(db, modelInfo.AllowedModelIDs)
-			if err != nil {
-				log.Println("driver_recent_trip_list (legacy): CountDriverShowBookings error:", err)
-			}
+			log.Println("driver_recent_trip_list (legacy): CountDriverShowBookings error:", err)
 		}
 
 		result := gin.H{
@@ -151,7 +162,7 @@ func DriverRecentTripListLegacy() gin.HandlerFunc {
 			"total_trips":             totalTrips,
 			"total_amount":            formatAmount(totalAmount),
 			"driver_wallet":           driverWallet,
-			"accept_higher_end_model": trimAcceptHigherEndModel(driverInfo["accept_higher_end_model"]),
+			"accept_higher_end_model": modelIDsToIDObjects(modelInfo.AllowedModelIDs),
 			"show_booking_count":      showBookingCount,
 		}
 
@@ -191,26 +202,14 @@ func DriverRecentTripListLegacy() gin.HandlerFunc {
 	}
 }
 
-// trimAcceptHigherEndModel ports the "only .id is read by the app" trim
-// (moddriverapi201.php:5078-5086) - unlike GetDriverModelInfo's
-// accept_higher_end_model handling in driverBookingListModel.go (which reads
-// each element as a bare model id), this case's legacy code reads each
-// element as a sub-document with an 'id' key ($model['id']); reproduced as-is
-// rather than assuming the two ports' shapes must agree.
-func trimAcceptHigherEndModel(v interface{}) []gin.H {
-	trimmed := []gin.H{}
-	arr, ok := v.(bson.A)
-	if !ok {
-		return trimmed
+// modelIDsToIDObjects wraps each id as {"id": ...} - the wire shape
+// moddriverapi201.php:5078-5086's own accept_higher_end_model trim uses
+// ("only .id is read by the app"), kept for this merged
+// (taxi_mapping.model_id + accept_higher_end_model) list too.
+func modelIDsToIDObjects(ids []int64) []gin.H {
+	out := make([]gin.H, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, gin.H{"id": id})
 	}
-	for _, m := range arr {
-		doc, ok := m.(bson.M)
-		if !ok {
-			continue
-		}
-		if id, ok := doc["id"]; ok {
-			trimmed = append(trimmed, gin.H{"id": id})
-		}
-	}
-	return trimmed
+	return out
 }
