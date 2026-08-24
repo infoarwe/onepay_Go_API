@@ -79,13 +79,6 @@ func (m *MongoDB) GetDatabase(domain string) (*mongo.Database, error) {
 	return mongoDB, nil
 }
 
-// GetMasterDatabase returns the shared master database used for
-// tenant-bootstrap lookups (e.g. company_domain resolution) that happen
-// before a per-tenant database is known.
-func (m *MongoDB) GetMasterDatabase() *mongo.Database {
-	return m.Client.Database(common.Config.MgDbName)
-}
-
 // OpenCollection returns a collection
 func (m *MongoDB) OpenCollection(database *mongo.Database, collectionName string) interface{} {
 	return database.Collection(collectionName)
@@ -119,12 +112,26 @@ func (m *MongoDB) LoadDomains() {
 	fmt.Println("company_domain rows visible at startup:", count)
 }
 
-// IsDomainValid checks the master company_domain registry for a matching,
-// active row - see models.FindCompanyDomain (ported from
-// moddriverapi113.php's check_company_domain()).
+// IsDomainValid checks for a matching, active company_domain row - see
+// models.FindCompanyDomain (ported from moddriverapi113.php's
+// check_company_domain()).
+//
+// Confirmed against live data across three tenant databases (onepaytaxi,
+// uatonepaytaxi, ridelogic) that there is NO single shared master registry:
+// each tenant database self-registers exactly one company_domain row for
+// itself (e.g. the `onepaytaxi` db's own company_domain collection holds
+// `{company_domain: "onepaytaxi"}`, not a cross-tenant list). This used to
+// query common.Config.MgDbName as a fixed "master" db instead - which only
+// ever validated successfully for the one domain that happened to equal
+// MgDbName (uatonepaytaxi in every deployment's config.json seen so far),
+// silently rejecting every other real tenant domain as "Invalid Domain".
 func (m *MongoDB) IsDomainValid(domain string) bool {
-	masterDB := m.Client.Database(common.Config.MgDbName)
-	result, err := models.FindCompanyDomain(masterDB, domain)
+	tenantDB, err := m.GetDatabase(domain)
+	if err != nil {
+		log.Printf("IsDomainValid lookup error for %q: %v\n", domain, err)
+		return false
+	}
+	result, err := models.FindCompanyDomain(tenantDB, domain)
 	if err != nil {
 		log.Printf("IsDomainValid lookup error for %q: %v\n", domain, err)
 		return false

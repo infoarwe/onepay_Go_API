@@ -44,9 +44,21 @@ func CheckCompanyDomain() gin.HandlerFunc {
 			c.JSON(http.StatusOK, response.LegacyResponse{Message: "Database Connection Failed", Status: 2})
 			return
 		}
-		masterDB := mongoDB.GetMasterDatabase()
+		// Each tenant database self-registers its own single company_domain
+		// row (confirmed against live onepaytaxi/uatonepaytaxi/ridelogic
+		// data) - there's no separate shared master registry, so this looks
+		// up req.CompanyDomain inside the database of that same name, same
+		// as database.MongoDB.IsDomainValid does. Using GetMasterDatabase()
+		// here instead used to only ever resolve successfully for whichever
+		// single domain happened to equal common.Config.MgDbName.
+		tenantDB, err := mongoDB.GetDatabase(req.CompanyDomain)
+		if err != nil {
+			log.Println("check_companydomain: GetDatabase error:", err)
+			c.JSON(http.StatusOK, response.LegacyResponse{Message: "Database Connection Failed", Status: 2})
+			return
+		}
 
-		domain, err := models.FindCompanyDomain(masterDB, req.CompanyDomain)
+		domain, err := models.FindCompanyDomain(tenantDB, req.CompanyDomain)
 		if err != nil {
 			log.Println("check_companydomain: FindCompanyDomain error:", err)
 			c.JSON(http.StatusOK, response.LegacyResponse{Message: "Database Connection Failed", Status: 2})
@@ -60,7 +72,7 @@ func CheckCompanyDomain() gin.HandlerFunc {
 			return
 		}
 
-		_ = models.MarkCompanyDomainUsed(masterDB, domain.DomainID)
+		_ = models.MarkCompanyDomainUsed(tenantDB, domain.DomainID)
 
 		companyDomain := strings.ToLower(strings.TrimSpace(req.CompanyDomain))
 		protocol := "https"
