@@ -86,7 +86,7 @@ func DriverRecentTripList() gin.HandlerFunc {
 		if siteInfo == nil {
 			siteInfo = bson.M{}
 		}
-		_, loc := resolveTenantLocation(siteInfo["timezone"])
+		_, loc := resolveTenantLocation(siteInfo["user_time_zone"])
 		// api_base isn't a real siteinfo field (confirmed against a live
 		// dump) - the tenant's public asset host is a static deploy
 		// constant in the legacy PHP, so it comes from config here instead,

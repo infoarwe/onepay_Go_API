@@ -47,13 +47,13 @@ import (
 // lat/long) - matches the comment already in the legacy code noting this
 // was trimmed to only what the driver app reads.
 //
-// Fidelity note: pickup_time/pickup_time_text are formatted directly from
-// the stored UTC timestamp (Y-m-d H:i:s / 02 Jan 2006, 15:04) rather than
-// through the legacy Commonfunction::getDateTimeFormat()'s tenant-timezone
-// conversion - that helper's exact per-tenant offset logic isn't ported
-// elsewhere in this Go service yet (resolveTenantLocation exists but reads
-// siteinfo.timezone via a different call site); worth revisiting once a
-// shared tenant-timezone helper exists in this package.
+// pickup_time/pickup_time_text are formatted in the tenant's local timezone
+// (resolveTenantLocation, same helper GetCoreConfig/DriverLogin use -
+// defaults to common.Config.DefaultTimezone, "Asia/Kolkata", when siteinfo
+// doesn't specify one) rather than the raw stored UTC timestamp - confirmed
+// against a live mismatch (admin panel showed 13:00 IST for a booking the
+// driver app showed as 07:30, exactly the 5:30 UTC offset) that the earlier
+// UTC-only formatting was actually reaching the driver app un-converted.
 func DriverBookingList() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req requests.DriverBookingListRequest
@@ -109,6 +109,7 @@ func DriverBookingList() gin.HandlerFunc {
 		}
 		defaultCommission := toFloat64Any(siteInfo["admin_commission"])
 		driverTax := toFloat64Any(siteInfo["driver_tax"])
+		_, loc := resolveTenantLocation(siteInfo["user_time_zone"])
 
 		var startPtr, limitPtr *int64
 		if req.Start >= 0 && req.Limit > 0 {
@@ -148,8 +149,8 @@ func DriverBookingList() gin.HandlerFunc {
 
 			showBooking = append(showBooking, gin.H{
 				"passengers_log_id":   strconv.FormatInt(r.PassengersLogID, 10),
-				"pickup_time":         formatPickupTime(r.PickupTime),
-				"pickup_time_text":    formatPickupTimeText(r.PickupTime),
+				"pickup_time":         formatPickupTime(r.PickupTime, loc),
+				"pickup_time_text":    formatPickupTimeText(r.PickupTime, loc),
 				"os_trip_type":        r.OsTripType,
 				"os_day_count":        orZero(r.OsDayCount),
 				"approx_fare":         r.ApproxFare,
@@ -180,18 +181,18 @@ func DriverBookingList() gin.HandlerFunc {
 	}
 }
 
-func formatPickupTime(t time.Time) string {
+func formatPickupTime(t time.Time, loc *time.Location) string {
 	if t.IsZero() {
 		return ""
 	}
-	return t.Format("2006-01-02 15:04:05")
+	return t.In(loc).Format("2006-01-02 15:04:05")
 }
 
-func formatPickupTimeText(t time.Time) string {
+func formatPickupTimeText(t time.Time, loc *time.Location) string {
 	if t.IsZero() {
 		return ""
 	}
-	return t.Format("02 Jan 2006, 15:04")
+	return t.In(loc).Format("02 Jan 2006, 15:04")
 }
 
 func toIntAny(v interface{}) int {

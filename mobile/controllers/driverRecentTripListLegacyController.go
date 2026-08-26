@@ -113,7 +113,7 @@ func DriverRecentTripListLegacy() gin.HandlerFunc {
 		if siteInfo == nil {
 			siteInfo = bson.M{}
 		}
-		_, loc := resolveTenantLocation(siteInfo["timezone"])
+		_, loc := resolveTenantLocation(siteInfo["user_time_zone"])
 		now := time.Now().In(loc)
 		dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).UTC()
 		dayEnd := dayStart.AddDate(0, 0, 1)

@@ -290,7 +290,7 @@ func GetCoreConfig() gin.HandlerFunc {
 			detail["default_payment_id"] = gateway["_id"]
 		}
 
-		timezone, loc := resolveTenantLocation(detail["timezone"])
+		timezone, loc := resolveTenantLocation(detail["user_time_zone"])
 		nowUTC := time.Now().UTC()
 		_, offsetSeconds := nowUTC.In(loc).Zone()
 		utcTime := nowUTC.Unix()
@@ -440,11 +440,13 @@ func defaultLanguageColorBase(apiBase, domain string) bson.M {
 	}
 }
 
-// resolveTenantLocation resolves a tenant's timezone name (as read off a
-// siteinfo document, may be missing/empty) to a *time.Location, falling
-// back to common.Config.DefaultTimezone and then "UTC". Shared by
-// GetCoreConfig (current_time/utc_time) and DriverLogin (today's day
-// bounds for driver_statistics).
+// resolveTenantLocation resolves a tenant's timezone name (siteinfo's
+// `user_time_zone` field, may be missing/empty - confirmed against a live
+// siteinfo doc; every call site used to read a nonexistent `timezone` field
+// instead, silently always falling back to the default below) to a
+// *time.Location, falling back to common.Config.DefaultTimezone and then
+// "UTC". Shared across GetCoreConfig, DriverLogin, driver_booking_list, and
+// both driver_recent_trip_list ports.
 func resolveTenantLocation(rawTimezone interface{}) (string, *time.Location) {
 	timezone, _ := rawTimezone.(string)
 	if timezone == "" {

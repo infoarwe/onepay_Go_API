@@ -191,7 +191,7 @@ func DriverLogin() gin.HandlerFunc {
 		}
 		var timezoneField interface{}
 		if siteInfo != nil {
-			timezoneField = siteInfo["timezone"]
+			timezoneField = siteInfo["user_time_zone"]
 		}
 		_, loc := resolveTenantLocation(timezoneField)
 
